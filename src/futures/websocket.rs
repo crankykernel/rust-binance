@@ -20,58 +20,53 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use futures_util::{Sink, Stream, TryStreamExt};
 use serde::Deserialize;
+use tokio_tungstenite::tungstenite::handshake::client::Response;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::common::stream::AggTrade;
 use crate::parsers::*;
 
-const BASE_URL: &str = "wss://fstream.binance.com";
+pub const BASE_URL: &str = "wss://fstream.binance.com";
 
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum WebSocketError {
-    #[error("websocket: {0}")]
-    WebSocket(#[from] tokio_tungstenite::tungstenite::Error),
+pub trait BinanceFuturesStream:
+    Stream<Item = Result<Event, tokio_tungstenite::tungstenite::Error>> + Sink<Message>
+{
 }
 
-pub struct WebSocket {
-    pub reader: Box<
-        dyn Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin + Send,
-    >,
-    pub writer:
-        Box<dyn Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin + Send>,
+impl<T: Stream<Item = Result<Event, tokio_tungstenite::tungstenite::Error>> + Sink<Message>>
+    BinanceFuturesStream for T
+{
 }
 
-impl WebSocket {
-    // Return values:
-    // - None: Stream is done, reconnect or something.
-    // - Some(Err(error)): A fatal error occurred. Should reconnect.
-    // - Some(Ok(event)): A message was decoded.
-    //
-    // Unknown message or serde_json parse errors will not be returned as errors, instead they
-    // will be return using `Event::Message` (the raw websocket message).
-    pub async fn next(&mut self) -> Option<Result<Event, WebSocketError>> {
-        loop {
-            match self.reader.next().await {
-                None => return None,
-                Some(Err(err)) => return Some(Err(err.into())),
-                Some(Ok(message)) => {
-                    if let Message::Ping(data) = &message {
-                        let _ = self.writer.send(Message::Pong(data.clone())).await;
-                        continue;
-                    }
-                    let event = Decoder {}.decode_message(message);
-                    return Some(Ok(event));
-                }
-            }
-        }
-    }
+pub async fn connect<S: AsRef<str>>(
+    endpoint: S,
+) -> Result<(impl BinanceFuturesStream, Response), tokio_tungstenite::tungstenite::Error> {
+    let url = format!("{}/{}", BASE_URL, endpoint.as_ref());
+    let (ws, response) = tokio_tungstenite::connect_async(url.clone()).await?;
+    let ws = ws.try_filter(|msg| std::future::ready(msg.is_text() || msg.is_ping()));
+    let ws = ws.map_ok(Event::decode_message);
+    Ok((ws, response))
+}
+
+pub async fn connect_stream<S: AsRef<str>>(
+    stream: S,
+) -> Result<(impl BinanceFuturesStream, Response), tokio_tungstenite::tungstenite::Error> {
+    let endpoint = format!("ws/{}", stream.as_ref());
+    connect(endpoint).await
+}
+
+pub async fn connect_combined<S: AsRef<str>>(
+    streams: &[S],
+) -> Result<(impl BinanceFuturesStream, Response), tokio_tungstenite::tungstenite::Error> {
+    let streams: Vec<&str> = streams.iter().map(|s| s.as_ref()).collect();
+    let streams = streams.join("/");
+    let endpoint = format!("stream?streams={}", streams);
+    connect(endpoint).await
 }
 
 #[derive(Debug)]
-#[non_exhaustive]
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// Undecoded WebSocket message.
@@ -84,46 +79,35 @@ pub enum Event {
     OrderTradeUpdate(OrderTradeUpdateEvent),
     /// Account update event (user stream).
     AccountUpdate(AccountUpdate),
+    ParseError(serde_json::Error, String),
+    Unknown(String),
+
+    /// WebSocket ping.
+    Ping(Vec<u8>),
 }
 
-pub struct Decoder {}
-
-impl Decoder {
-    pub fn decode_message(&self, message: Message) -> Event {
-        match &message {
-            Message::Text(message) => {
-                // Decode a text message. The idea here is to not fail if the message cannot
-                // be decoded, but instead fallback to just returning the raw websocket message.
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(message) {
-                    if let Ok(Some(event)) = self.decode_value(value) {
-                        return event;
-                    }
-                }
-            }
-            Message::Binary(_) => {}
-            Message::Ping(_) => {}
-            Message::Pong(_) => {}
-            Message::Close(_) => {}
+impl Event {
+    pub fn decode_message(message: Message) -> Event {
+        match message {
+            Message::Text(message) => serde_json::from_str::<serde_json::Value>(&message)
+                .and_then(Self::decode_value)
+                .unwrap_or_else(|err| Some(Self::ParseError(err, message.to_string())))
+                .unwrap_or_else(|| Self::Unknown(message.to_string())),
+            Message::Ping(data) => Event::Ping(data),
+            _ => unreachable!(),
         }
-        Event::Message(message)
     }
 
-    pub fn decode_value(
-        &self,
-        mut value: serde_json::Value,
-    ) -> Result<Option<Event>, serde_json::Error> {
+    pub fn decode_value(mut value: serde_json::Value) -> Result<Option<Event>, serde_json::Error> {
         if value["stream"].is_string() && value["data"]["e"].is_string() {
-            return self.decode_data(value["data"].take());
+            return Self::decode_data(value["data"].take());
         } else if value["e"].is_string() {
-            return self.decode_data(value);
+            return Self::decode_data(value);
         }
         Ok(None)
     }
 
-    pub fn decode_data(
-        &self,
-        value: serde_json::Value,
-    ) -> Result<Option<Event>, serde_json::Error> {
+    pub fn decode_data(value: serde_json::Value) -> Result<Option<Event>, serde_json::Error> {
         if let Some(e) = value["e"].as_str() {
             match e {
                 "kline" => {
@@ -145,30 +129,6 @@ impl Decoder {
         }
         Ok(None)
     }
-}
-
-pub async fn connect<S: AsRef<str>>(endpoint: S) -> Result<WebSocket, WebSocketError> {
-    let url = format!("{}/{}", BASE_URL, endpoint.as_ref());
-
-    let (ws, _response) = tokio_tungstenite::connect_async(url.clone()).await?;
-    let (wd, rd) = ws.split();
-    let ws = WebSocket {
-        reader: Box::new(rd),
-        writer: Box::new(wd),
-    };
-    Ok(ws)
-}
-
-pub async fn connect_stream<S: AsRef<str>>(stream: S) -> Result<WebSocket, WebSocketError> {
-    let endpoint = format!("ws/{}", stream.as_ref());
-    connect(endpoint).await
-}
-
-pub async fn connect_combined<S: AsRef<str>>(streams: &[S]) -> Result<WebSocket, WebSocketError> {
-    let streams: Vec<&str> = streams.iter().map(|s| s.as_ref()).collect();
-    let streams = streams.join("/");
-    let endpoint = format!("stream?streams={}", streams);
-    connect(endpoint).await
 }
 
 pub fn agg_trade_stream<S: AsRef<str>>(symbol: S) -> String {
