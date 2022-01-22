@@ -178,6 +178,22 @@ pub struct Kline {
     #[serde(rename = "v", deserialize_with = "parse_f64_string")]
     pub volume: f64,
 
+    // Number of trades.
+    #[serde(rename = "n")]
+    pub trade_count: u64,
+
+    // Quote asset volume.
+    #[serde(rename = "q", deserialize_with = "parse_f64_string")]
+    pub quote_volume: f64,
+
+    // Taker buy base asset volume.
+    #[serde(rename = "V", deserialize_with = "parse_f64_string")]
+    pub taker_base_volume: f64,
+
+    // Taker buy quote asset volume.
+    #[serde(rename = "Q", deserialize_with = "parse_f64_string")]
+    pub taker_buy_quote_volume: f64,
+
     #[serde(rename = "x")]
     pub closed: bool,
 }
