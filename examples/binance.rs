@@ -1,27 +1,27 @@
 use anyhow::Result;
 use binance::common::client::Authentication;
-use clap::Clap;
+use clap::Parser;
 
-#[derive(Clap, Debug)]
+#[derive(clap::Parser, Debug)]
 enum Futures {
     OpenOrders(OpenOrdersOpts),
     Cancel(CancelOrderOpts),
 }
 
-#[derive(Clap, Debug)]
+#[derive(clap::Parser, Debug)]
 enum Opts {
     Spot,
     #[clap(subcommand)]
     Futures(Futures),
 }
 
-#[derive(Clap, Debug)]
+#[derive(clap::Parser, Debug)]
 struct OpenOrdersOpts {
     #[clap(long)]
     symbol: Option<String>,
 }
 
-#[derive(Clap, Debug)]
+#[derive(clap::Parser, Debug)]
 struct CancelOrderOpts {
     #[clap(long)]
     symbol: String,

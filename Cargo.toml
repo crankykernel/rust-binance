@@ -20,4 +20,4 @@ tokio-tungstenite = { version = "0.15.0", features = ["rustls-tls"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-clap = "3.0.0-beta.4"
+clap = { version = "3.0.10", features = ["derive"] }
