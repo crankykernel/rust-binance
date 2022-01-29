@@ -23,7 +23,10 @@
 //! My Binance client code.
 
 pub mod common;
+pub mod error;
 pub mod futures;
 pub mod parsers;
 pub mod spot;
 pub mod types;
+
+pub use error::Error;

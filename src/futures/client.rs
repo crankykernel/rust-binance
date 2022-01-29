@@ -27,10 +27,11 @@ use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::common::client::{Authentication, Error, ListenKeyResponse};
+use crate::common::client::{Authentication, ListenKeyResponse};
 use crate::parsers::*;
 use crate::spot::client::{ExchangeInfoResponse, OrderSide, OrderType};
 use crate::types::{BookTickerResponse, CancelOrder, TimeInForce};
+use crate::Error;
 
 pub const API_ROOT: &str = "https://fapi.binance.com";
 

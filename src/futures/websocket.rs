@@ -1,69 +1,66 @@
 // Copyright (c) 2021 Cranky Kernel
 //
-// Permission is hereby granted, free of charge, to any person
-// obtaining a copy of this software and associated documentation
-// files (the "Software"), to deal in the Software without
-// restriction, including without limitation the rights to use, copy,
-// modify, merge, publish, distribute, sublicense, and/or sell copies
-// of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be
-// included in all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-// NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-// WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
-use futures_util::{Sink, Stream, TryStreamExt};
+use futures_util::StreamExt;
 use serde::Deserialize;
-use tokio_tungstenite::tungstenite::handshake::client::Response;
+use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{connect_async, tungstenite, MaybeTlsStream, WebSocketStream};
 
 use crate::common::stream::AggTrade;
 use crate::parsers::*;
 
 pub const BASE_URL: &str = "wss://fstream.binance.com";
 
-pub trait BinanceFuturesStream:
-    Stream<Item = Result<Event, tokio_tungstenite::tungstenite::Error>> + Sink<Message>
-{
+pub struct WebSocket {
+    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
 
-impl<T: Stream<Item = Result<Event, tokio_tungstenite::tungstenite::Error>> + Sink<Message>>
-    BinanceFuturesStream for T
-{
+impl WebSocket {
+    pub fn new(ws: WebSocketStream<MaybeTlsStream<TcpStream>>) -> Self {
+        Self { ws }
+    }
+
+    pub async fn next(&mut self) -> Option<Result<Event, tokio_tungstenite::tungstenite::Error>> {
+        loop {
+            let next = self.ws.next().await;
+            match next {
+                Some(Ok(message)) => match message {
+                    Message::Ping(_) | Message::Text(_) => {
+                        return Some(Ok(Event::decode_message(message)));
+                    }
+                    _ => {
+                        // Ignore, move onto the next incoming message.
+                    }
+                },
+                Some(Err(err)) => {
+                    return Some(Err(err));
+                }
+                None => {
+                    return None;
+                }
+            }
+        }
+    }
 }
 
-pub async fn connect<S: AsRef<str>>(
-    endpoint: S,
-) -> Result<(impl BinanceFuturesStream, Response), tokio_tungstenite::tungstenite::Error> {
-    let url = format!("{}/{}", BASE_URL, endpoint.as_ref());
-    let (ws, response) = tokio_tungstenite::connect_async(url.clone()).await?;
-    let ws = ws.try_filter(|msg| std::future::ready(msg.is_text() || msg.is_ping()));
-    let ws = ws.map_ok(Event::decode_message);
-    Ok((ws, response))
+pub async fn connect<T: AsRef<str>>(url: T) -> Result<WebSocket, tungstenite::Error> {
+    let (ws, _response) = connect_async(url.as_ref()).await?;
+    Ok(WebSocket::new(ws))
 }
 
-pub async fn connect_stream<S: AsRef<str>>(
-    stream: S,
-) -> Result<(impl BinanceFuturesStream, Response), tokio_tungstenite::tungstenite::Error> {
-    let endpoint = format!("ws/{}", stream.as_ref());
-    connect(endpoint).await
+pub async fn connect_stream<T: AsRef<str>>(name: T) -> Result<WebSocket, tungstenite::Error> {
+    let url = format!("{}/ws/{}", BASE_URL, name.as_ref());
+    connect(&url).await
 }
 
-pub async fn connect_combined<S: AsRef<str>>(
-    streams: &[S],
-) -> Result<(impl BinanceFuturesStream, Response), tokio_tungstenite::tungstenite::Error> {
-    let streams: Vec<&str> = streams.iter().map(|s| s.as_ref()).collect();
-    let streams = streams.join("/");
-    let endpoint = format!("stream?streams={}", streams);
-    connect(endpoint).await
+pub async fn connect_combined<T: AsRef<str>>(
+    streams: &[T],
+) -> Result<WebSocket, tungstenite::Error> {
+    let streams: Vec<&str> = streams.iter().map(|e| e.as_ref()).collect();
+    let url = format!("{}/stream?streams={}", BASE_URL, streams.join("/"));
+    connect(&url).await
 }
 
 #[derive(Debug)]
@@ -129,18 +126,6 @@ impl Event {
         }
         Ok(None)
     }
-}
-
-pub fn agg_trade_stream<S: AsRef<str>>(symbol: S) -> String {
-    format!("{}@aggTrade", symbol.as_ref().to_lowercase())
-}
-
-pub fn kline_stream<S: AsRef<str>, I: AsRef<str>>(symbol: S, interval: I) -> String {
-    format!(
-        "{}@kline_{}",
-        symbol.as_ref().to_lowercase(),
-        interval.as_ref()
-    )
 }
 
 #[derive(Clone, Debug, Deserialize)]

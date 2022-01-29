@@ -1,24 +1,4 @@
-// Copyright (c) 2021 Cranky Kernel
-//
-// Permission is hereby granted, free of charge, to any person
-// obtaining a copy of this software and associated documentation
-// files (the "Software"), to deal in the Software without
-// restriction, including without limitation the rights to use, copy,
-// modify, merge, publish, distribute, sublicense, and/or sell copies
-// of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be
-// included in all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-// NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-// WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,45 +6,12 @@ use anyhow::{anyhow, Result};
 use hmac::{Mac, NewMac};
 use serde::Deserialize;
 
-use crate::futures::client::ApiError;
+use crate::error::Error;
 
 #[derive(Clone)]
 pub struct Authentication {
     pub api_secret: String,
     pub api_key: String,
-}
-
-#[derive(thiserror::Error, Debug)]
-pub enum Error {
-    /// Raw serde_json error.
-    #[error("serde: {0}")]
-    Serde(#[from] serde_json::Error),
-
-    /// A serde_json::Error with the text that failed.
-    #[error("json parse error: {error}")]
-    Decode {
-        error: serde_json::Error,
-        text: String,
-    },
-
-    /// Wrap errorrs that were generated with anyhow.
-    #[error("anyhow: {0}")]
-    Anyhow(#[from] anyhow::Error),
-
-    /// Error from the reqwuest http client library.
-    #[error("reqwest: {0}")]
-    Request(#[from] reqwest::Error),
-
-    /// Errors from the URL encoding library.
-    #[error("urlencode: {0}")]
-    UrlEncode(#[from] serde_urlencoded::ser::Error),
-
-    /// An error sent from the remote API in response to a request.
-    #[error("api: {0}")]
-    ApiError(#[from] ApiError),
-
-    #[error("url: {0}")]
-    UrlError(String),
 }
 
 #[derive(Clone)]
