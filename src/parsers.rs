@@ -23,7 +23,7 @@
 //! Helper parser/deserializes for decoding some Binance messages.
 
 use serde::de::Error;
-use serde::Deserialize;
+use serde::{Deserialize, Serializer};
 
 pub fn parse_f64_string<'de, D>(d: D) -> Result<f64, D::Error>
 where
@@ -48,4 +48,14 @@ where
 {
     let s: String = Deserialize::deserialize(d)?;
     s.parse::<bool>().map_err(D::Error::custom)
+}
+
+pub(crate) fn serialize_opt_f64<S>(v: &Option<f64>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match v {
+        None => s.serialize_none(),
+        Some(v) => s.serialize_str(&format!("{:09}", v)),
+    }
 }

@@ -17,3 +17,11 @@ pub fn stream_name_kline<S: AsRef<str>, I: AsRef<str>>(symbol: S, interval: I) -
         interval.as_ref()
     )
 }
+
+pub fn stream_name_liquidation<S: AsRef<str>>(symbol: S) -> String {
+    format!("{}@forceOrder", symbol.as_ref().to_lowercase())
+}
+
+pub fn stream_name_ticker<S: AsRef<str>>(symbol: S) -> String {
+    format!("{}@ticker", symbol.as_ref().to_lowercase())
+}

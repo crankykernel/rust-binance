@@ -171,6 +171,10 @@ impl SymbolInfo {
     pub fn get_lot_size_filter(&self) -> Option<&SymbolFilter> {
         self.get_filter("LOT_SIZE")
     }
+
+    pub fn is_trading(&self) -> bool {
+        self.status == "TRADING"
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]

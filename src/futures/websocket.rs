@@ -1,9 +1,10 @@
-// Copyright (c) 2021 Cranky Kernel
+// Copyright (c) 2021-2022 Cranky Kernel
 //
 // SPDX-License-Identifier: MIT
 
 use futures_util::StreamExt;
 use serde::Deserialize;
+use serde_json::Value;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, tungstenite, MaybeTlsStream, WebSocketStream};
@@ -63,7 +64,7 @@ pub async fn connect_combined<T: AsRef<str>>(
     connect(&url).await
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
     /// Undecoded WebSocket message.
@@ -76,7 +77,13 @@ pub enum Event {
     OrderTradeUpdate(OrderTradeUpdateEvent),
     /// Account update event (user stream).
     AccountUpdate(AccountUpdate),
-    ParseError(serde_json::Error, String),
+    /// Public liquidation event.
+    LiquidationEvent(LiquidationEvent),
+    Ticker(Ticker),
+
+    /// A serde deserialize error. We use a string for the serde error so we can implement clone.
+    /// The second string is the input that failed to parse.
+    ParseError(String, String),
     Unknown(String),
 
     /// WebSocket ping.
@@ -86,16 +93,16 @@ pub enum Event {
 impl Event {
     pub fn decode_message(message: Message) -> Event {
         match message {
-            Message::Text(message) => serde_json::from_str::<serde_json::Value>(&message)
+            Message::Text(message) => serde_json::from_str::<Value>(&message)
                 .and_then(Self::decode_value)
-                .unwrap_or_else(|err| Some(Self::ParseError(err, message.to_string())))
+                .unwrap_or_else(|err| Some(Self::ParseError(err.to_string(), message.to_string())))
                 .unwrap_or_else(|| Self::Unknown(message.to_string())),
             Message::Ping(data) => Event::Ping(data),
             _ => unreachable!(),
         }
     }
 
-    pub fn decode_value(mut value: serde_json::Value) -> Result<Option<Event>, serde_json::Error> {
+    pub fn decode_value(mut value: Value) -> Result<Option<Event>, serde_json::Error> {
         if value["stream"].is_string() && value["data"]["e"].is_string() {
             return Self::decode_data(value["data"].take());
         } else if value["e"].is_string() {
@@ -104,7 +111,7 @@ impl Event {
         Ok(None)
     }
 
-    pub fn decode_data(value: serde_json::Value) -> Result<Option<Event>, serde_json::Error> {
+    pub fn decode_data(mut value: Value) -> Result<Option<Event>, serde_json::Error> {
         if let Some(e) = value["e"].as_str() {
             match e {
                 "kline" => {
@@ -121,14 +128,29 @@ impl Event {
                 "ACCOUNT_UPDATE" => {
                     return Ok(Some(Event::AccountUpdate(serde_json::from_value(value)?)));
                 }
+                "forceOrder" => {
+                    return Ok(Some(Event::LiquidationEvent(serde_json::from_value(
+                        value["o"].take(),
+                    )?)));
+                }
+                "24hrTicker" => {
+                    return Ok(Some(Event::Ticker(serde_json::from_value(value)?)));
+                }
                 _ => {}
             }
         }
         Ok(None)
     }
+
+    pub fn is_liquidation_event(&self) -> bool {
+        match self {
+            Self::LiquidationEvent(_) => true,
+            _ => false,
+        }
+    }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct KlineEvent {
     #[serde(rename = "e")]
     pub event_type: String,
@@ -140,7 +162,7 @@ pub struct KlineEvent {
     pub kline: Kline,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Kline {
     #[serde(rename = "t")]
     pub open_time: f64,
@@ -183,7 +205,7 @@ pub struct Kline {
     pub closed: bool,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct OrderTradeUpdateEvent {
     #[serde(rename = "e")]
     pub event_type: String,
@@ -195,7 +217,7 @@ pub struct OrderTradeUpdateEvent {
     pub update: OrderTradeUpdate,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct OrderTradeUpdate {
     #[serde(rename = "s")]
     pub symbol: String,
@@ -259,7 +281,7 @@ pub struct OrderTradeUpdate {
     pub realized_profit: f64,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct AccountUpdate {
     #[serde(rename = "e")]
     pub event_type: String,
@@ -271,7 +293,7 @@ pub struct AccountUpdate {
     pub data: AccountUpdateData,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct AccountUpdateData {
     #[serde(rename = "m")]
     pub reason: String,
@@ -281,7 +303,7 @@ pub struct AccountUpdateData {
     pub positions: Vec<AccountUpdatePosition>,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct AccountUpdateBalances {
     #[serde(rename = "a")]
     pub asset: String,
@@ -291,7 +313,7 @@ pub struct AccountUpdateBalances {
     pub cross_wallet_balance: f64,
 }
 
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Clone, Debug, PartialEq)]
 pub struct AccountUpdatePosition {
     #[serde(rename = "s")]
     pub symbol: String,
@@ -309,6 +331,72 @@ pub struct AccountUpdatePosition {
     pub isolated_wallet: f64,
     #[serde(rename = "ps")]
     pub position_side: String,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct LiquidationEvent {
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "S")]
+    pub side: String,
+    #[serde(rename = "o")]
+    pub order_type: String,
+    #[serde(rename = "f")]
+    pub time_in_force: String,
+    #[serde(rename = "q", deserialize_with = "parse_f64_string")]
+    pub original_quantity: f64,
+    #[serde(rename = "p", deserialize_with = "parse_f64_string")]
+    pub price: f64,
+    #[serde(rename = "ap", deserialize_with = "parse_f64_string")]
+    pub average_price: f64,
+    #[serde(rename = "X")]
+    pub order_status: String,
+    #[serde(rename = "l", deserialize_with = "parse_f64_string")]
+    pub last_fill_quantity: f64,
+    #[serde(rename = "z", deserialize_with = "parse_f64_string")]
+    pub accumulated_quantity: f64,
+    #[serde(rename = "T")]
+    pub trade_time: u64,
+}
+
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+pub struct Ticker {
+    #[serde(rename = "e")]
+    pub event_type: String,
+    #[serde(rename = "E")]
+    pub event_time: u64,
+    #[serde(rename = "s")]
+    pub symbol: String,
+    #[serde(rename = "p", deserialize_with = "parse_f64_string")]
+    pub price_change: f64,
+    #[serde(rename = "P", deserialize_with = "parse_f64_string")]
+    pub price_change_percent: f64,
+    #[serde(rename = "w", deserialize_with = "parse_f64_string")]
+    pub weight_avg_price: f64,
+    #[serde(rename = "c", deserialize_with = "parse_f64_string")]
+    pub last_price: f64,
+    #[serde(rename = "Q", deserialize_with = "parse_f64_string")]
+    pub last_quantity: f64,
+    #[serde(rename = "o", deserialize_with = "parse_f64_string")]
+    pub open_price: f64,
+    #[serde(rename = "h", deserialize_with = "parse_f64_string")]
+    pub high_price: f64,
+    #[serde(rename = "l", deserialize_with = "parse_f64_string")]
+    pub low_price: f64,
+    #[serde(rename = "v", deserialize_with = "parse_f64_string")]
+    pub base_asset_volume: f64,
+    #[serde(rename = "q", deserialize_with = "parse_f64_string")]
+    pub quote_asset_volume: f64,
+    #[serde(rename = "O")]
+    pub stats_open_time: u64,
+    #[serde(rename = "C")]
+    pub stats_close_time: u64,
+    #[serde(rename = "F")]
+    pub first_trade_id: u64,
+    #[serde(rename = "L")]
+    pub last_trade_id: u64,
+    #[serde(rename = "n")]
+    pub trade_count: u64,
 }
 
 #[cfg(test)]
@@ -330,5 +418,62 @@ mod test {
                 "q":"0.100",
                 "p":"40000","ap":"0","sp":"0","x":"NEW","X":"NEW","i":13584185467,"l":"0","z":"0","L":"0","T":1612418801174,"t":0,"b":"0","a":"4000","m":false,"R":false,"wt":"CONTRACT_PRICE","ot":"LIMIT","ps":"SHORT","cp":false,"rp":"0","pP":false,"si":0,"ss":0}}"#;
         let _order_trade_update: OrderTradeUpdateEvent = serde_json::from_str(&_text).unwrap();
+    }
+
+    #[test]
+    fn test_deserialize_liquidation_event() {
+        let text = "\
+            {\"stream\":\"dogebusd@forceOrder\",\
+             \"data\":\
+                {\"e\":\"forceOrder\",\
+                 \"E\":1643948075159,\
+                 \"o\":{\
+                    \"s\":\"DOGEBUSD\",\
+                    \"S\":\"BUY\",\
+                    \"o\":\"LIMIT\",\
+                    \"f\":\"IOC\",\
+                    \"q\":\"568\",\
+                    \"p\":\"0.142229\",\
+                    \"ap\":\"0.138770\",\
+                    \"X\":\"FILLED\",\
+                    \"l\":\"568\",\
+                    \"z\":\"568\",\
+                    \"T\":1643948075152}}}";
+
+        let mut value: Value = serde_json::from_str(text).unwrap();
+        let _: LiquidationEvent = serde_json::from_value(value["data"]["o"].take()).unwrap();
+
+        let event = Event::decode_message(Message::Text(text.to_string()));
+        assert!(event.is_liquidation_event());
+        if let Event::LiquidationEvent(event) = event {
+            assert_eq!(event.symbol, "DOGEBUSD");
+        } else {
+            unreachable!();
+        }
+    }
+
+    #[test]
+    fn test_deserialize_ticker() {
+        let text = "{\
+            \"stream\":\"btcusdt@ticker\",\
+            \"data\":{\
+                \"e\":\"24hrTicker\",\
+                \"E\":1643956077872,\
+                \"s\":\"BTCUSDT\",\
+                \"p\":\"1070.58\",\
+                \"P\":\"2.905\",\
+                \"w\":\"36828.93\",\
+                \"c\":\"37920.00\",\
+                \"Q\":\"0.095\",\
+                \"o\":\"36849.42\",\
+                \"h\":\"38000.00\",\
+                \"l\":\"36204.30\",\
+                \"v\":\"338765.425\",\
+                \"q\":\"12476366874.26\",\
+                \"O\":1643869620000,\
+                \"C\":1643956077866,\
+                \"F\":1888682750,\
+                \"L\":1891841228,\
+                \"n\":3158308}}";
     }
 }

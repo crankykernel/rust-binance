@@ -58,9 +58,13 @@ impl CancelOrder {
 
 #[derive(Debug, Serialize, Clone)]
 pub enum TimeInForce {
+    /// Good till cancel.
     GTC,
+    /// Immediate or cancel.
     IOC,
+    /// Fill or kill.
     FOK,
+    /// Good till cross (post only).
     GTX,
 }
 

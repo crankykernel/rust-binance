@@ -47,18 +47,16 @@ impl Client {
         }
     }
 
-    pub async fn get_open_orders<S: AsRef<str> + std::fmt::Display + std::fmt::Debug>(
+    pub async fn get<T: DeserializeOwned>(
         &self,
-        symbol: Option<S>,
-    ) -> Result<Vec<OpenOrder>, Error> {
-        let endpoint = "/fapi/v1/openOrders";
-        let mut form = vec![];
-        if let Some(symbol) = symbol {
-            form.push(("symbol", symbol));
-        }
-        let form = build_form(&form[..]);
-        let response = self.authenticated_get(endpoint, &form).await?;
-        Ok(response)
+        endpoint: &str,
+        query_string: Option<&str>,
+    ) -> Result<T, Error> {
+        let url = self.client.url2(endpoint, query_string)?;
+        let response = self.client.client.get(url).send().await?;
+        let code = response.status();
+        let body = response.text().await?;
+        self.decode_response(code, &body)
     }
 
     pub async fn authenticated_get<T: DeserializeOwned>(
@@ -70,22 +68,6 @@ impl Client {
         let request = self
             .client
             .get3(endpoint, Some(&form))?
-            .headers(self.client.headers()?);
-        let response = request.send().await?;
-        let code = response.status();
-        let body = response.text().await?;
-        self.decode_response(code, &body)
-    }
-
-    pub async fn cancel_order(&self, request: &CancelOrder) -> Result<CancelOrderResponse, Error> {
-        let endpoint = "/fapi/v1/order";
-        let _form = serde_urlencoded::to_string(request)?;
-        let _form = self.client.sign_form(Some(&_form))?;
-        let url = self.client.url2(endpoint, Some(&_form))?;
-        let request = self
-            .client
-            .client
-            .delete(url)
             .headers(self.client.headers()?);
         let response = request.send().await?;
         let code = response.status();
@@ -117,6 +99,36 @@ impl Client {
         }
     }
 
+    pub async fn get_open_orders<S: AsRef<str> + std::fmt::Display + std::fmt::Debug>(
+        &self,
+        symbol: Option<S>,
+    ) -> Result<Vec<OpenOrder>, Error> {
+        let endpoint = "/fapi/v1/openOrders";
+        let mut form = vec![];
+        if let Some(symbol) = symbol {
+            form.push(("symbol", symbol));
+        }
+        let form = build_form(&form[..]);
+        let response = self.authenticated_get(endpoint, &form).await?;
+        Ok(response)
+    }
+
+    pub async fn cancel_order(&self, request: &CancelOrder) -> Result<CancelOrderResponse, Error> {
+        let endpoint = "/fapi/v1/order";
+        let _form = serde_urlencoded::to_string(request)?;
+        let _form = self.client.sign_form(Some(&_form))?;
+        let url = self.client.url2(endpoint, Some(&_form))?;
+        let request = self
+            .client
+            .client
+            .delete(url)
+            .headers(self.client.headers()?);
+        let response = request.send().await?;
+        let code = response.status();
+        let body = response.text().await?;
+        self.decode_response(code, &body)
+    }
+
     pub async fn get_klines(
         &self,
         symbol: &str,
@@ -138,18 +150,6 @@ impl Client {
     pub async fn get_exchange_info(&self) -> Result<ExchangeInfoResponse, Error> {
         let endpoint = "/fapi/v1/exchangeInfo";
         self.get(endpoint, None).await
-    }
-
-    pub async fn get<T: DeserializeOwned>(
-        &self,
-        endpoint: &str,
-        query_string: Option<&str>,
-    ) -> Result<T, Error> {
-        let url = self.client.url2(endpoint, query_string)?;
-        let response = self.client.client.get(url).send().await?;
-        let code = response.status();
-        let body = response.text().await?;
-        self.decode_response(code, &body)
     }
 
     pub async fn post_listenkey(&self) -> Result<ListenKeyResponse, Error> {
@@ -178,6 +178,40 @@ impl Client {
         let body = response.text().await?;
         self.decode_response(code, &body)
     }
+
+    // pub async fn post_batch_orders(
+    //     &self,
+    //     orders: &[&NewOrder],
+    // ) -> Result<Vec<OrderResponse>, Error> {
+    //     let endpoint = "/fapi/v1/batchOrders";
+    //
+    //     let orders = serde_json::to_string(orders).unwrap();
+    //     dbg!(&orders);
+    //
+    //     #[derive(Serialize)]
+    //     struct BatchOrder {
+    //         batchOrders: String,
+    //     }
+    //
+    //     let batchOrder = BatchOrder {
+    //         batchOrders: orders,
+    //     };
+    //
+    //     let form = serde_urlencoded::to_string(&batchOrder)?;
+    //     dbg!(&form);
+    //     let form = self.client.sign_form(Some(&form))?;
+    //     let response = self
+    //         .client
+    //         .client
+    //         .post(&format!("{}{}", API_ROOT, endpoint))
+    //         .headers(self.client.headers()?)
+    //         .body(form)
+    //         .send()
+    //         .await?;
+    //     let code = response.status();
+    //     let body = response.text().await?;
+    //     self.decode_response(code, &body)
+    // }
 
     pub async fn get_positions(&self, symbol: Option<&str>) -> Result<Vec<PositionEntry>, Error> {
         let endpoint = "/fapi/v2/positionRisk";
@@ -408,7 +442,9 @@ pub struct NewOrder {
     // Not always required, and optional fields.
     #[serde(rename = "positionSide")]
     pub position_side: Option<PositionSide>,
+    #[serde(serialize_with = "serialize_opt_f64")]
     pub quantity: Option<f64>,
+    #[serde(serialize_with = "serialize_opt_f64")]
     pub price: Option<f64>,
     #[serde(rename = "timeInForce")]
     pub time_in_force: Option<TimeInForce>,
@@ -426,7 +462,7 @@ pub struct NewOrder {
 impl NewOrder {
     pub fn new(symbol: &str, side: OrderSide, order_type: OrderType) -> Self {
         Self {
-            symbol: symbol.into(),
+            symbol: symbol.to_uppercase(),
             side,
             order_type,
             position_side: None,
@@ -470,13 +506,18 @@ impl NewOrder {
         order
     }
 
-    pub fn client_order_id(&mut self, order_id: String) -> &mut Self {
+    pub fn client_order_id(mut self, order_id: String) -> Self {
         self.client_order_id = Some(order_id);
         self
     }
 
-    pub fn reduce_only(&mut self) -> &mut Self {
+    pub fn reduce_only(mut self) -> Self {
         self.reduce_only = Some(true);
+        self
+    }
+
+    pub fn post_only(mut self) -> Self {
+        self.time_in_force = Some(TimeInForce::GTX);
         self
     }
 }
