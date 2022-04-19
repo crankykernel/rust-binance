@@ -129,6 +129,22 @@ impl Client {
         self.decode_response(code, &body)
     }
 
+    pub async fn cancel_all_open_orders(&self, symbol: &str) -> Result<serde_json::Value, Error> {
+        let endpoint = "/fapi/v1/allOpenOrders";
+        let form = serde_urlencoded::to_string(&[("symbol", symbol)])?;
+        let form = self.client.sign_form(Some(&form))?;
+        let url = self.client.url2(endpoint, Some(&form))?;
+        let request = self
+            .client
+            .client
+            .delete(url)
+            .headers(self.client.headers()?);
+        let response = request.send().await?;
+        let code = response.status();
+        let body = response.text().await?;
+        self.decode_response(code, &body)
+    }
+
     pub async fn get_klines(
         &self,
         symbol: &str,
@@ -307,7 +323,7 @@ pub struct OpenOrder {
     pub other: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct Kline {
     pub open_time: u64,
     #[serde(deserialize_with = "parse_f64_string")]
@@ -318,6 +334,8 @@ pub struct Kline {
     pub low: f64,
     #[serde(deserialize_with = "parse_f64_string")]
     pub close: f64,
+
+    /// Base volume.
     #[serde(deserialize_with = "parse_f64_string")]
     pub volume: f64,
     pub close_time: u64,
@@ -513,6 +531,11 @@ impl NewOrder {
 
     pub fn reduce_only(mut self) -> Self {
         self.reduce_only = Some(true);
+        self
+    }
+
+    pub fn close_position(mut self) -> Self {
+        self.close_position = Some(true);
         self
     }
 

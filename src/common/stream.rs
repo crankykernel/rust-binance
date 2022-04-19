@@ -24,7 +24,7 @@ use serde::Deserialize;
 
 use crate::parsers::*;
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
 pub struct AggTrade {
     #[serde(rename = "e")]
     pub event_type: String,

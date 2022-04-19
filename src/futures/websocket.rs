@@ -181,7 +181,7 @@ pub struct Kline {
     #[serde(rename = "l", deserialize_with = "parse_f64_string")]
     pub low: f64,
 
-    // Base asset volume.
+    /// Base asset volume.
     #[serde(rename = "v", deserialize_with = "parse_f64_string")]
     pub volume: f64,
 
