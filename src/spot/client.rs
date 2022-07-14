@@ -59,7 +59,7 @@ impl Client {
         let form = self.client.sign_form(Some(form))?;
         let request = self
             .client
-            .get3(endpoint, Some(&form))?
+            .get2(endpoint, Some(&form))?
             .headers(self.client.headers()?);
         let response = request.send().await?;
         let code = response.status();

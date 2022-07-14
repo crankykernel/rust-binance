@@ -69,22 +69,27 @@ pub async fn connect_combined<T: AsRef<str>>(
 pub enum Event {
     /// Undecoded WebSocket message.
     Message(Message),
+
     /// Kline/OHLC event.
     Kline(KlineEvent),
+
     /// Aggregate trade event.
     AggTrade(AggTrade),
+
     /// Order update event (user stream).
     OrderTradeUpdate(OrderTradeUpdateEvent),
+
     /// Account update event (user stream).
     AccountUpdate(AccountUpdate),
+
     /// Public liquidation event.
     LiquidationEvent(LiquidationEvent),
+
     Ticker(Ticker),
 
     /// A serde deserialize error. We use a string for the serde error so we can implement clone.
     /// The second string is the input that failed to parse.
     ParseError(String, String),
-    Unknown(String),
 
     /// WebSocket ping.
     Ping(Vec<u8>),
@@ -93,10 +98,10 @@ pub enum Event {
 impl Event {
     pub fn decode_message(message: Message) -> Event {
         match message {
-            Message::Text(message) => serde_json::from_str::<Value>(&message)
+            Message::Text(text) => serde_json::from_str::<Value>(&text)
                 .and_then(Self::decode_value)
-                .unwrap_or_else(|err| Some(Self::ParseError(err.to_string(), message.to_string())))
-                .unwrap_or_else(|| Self::Unknown(message.to_string())),
+                .unwrap_or_else(|err| Some(Self::ParseError(err.to_string(), text.to_string())))
+                .unwrap_or_else(|| Self::Message(Message::Text(text))),
             Message::Ping(data) => Event::Ping(data),
             _ => unreachable!(),
         }
@@ -146,6 +151,14 @@ impl Event {
         match self {
             Self::LiquidationEvent(_) => true,
             _ => false,
+        }
+    }
+
+    pub fn is_ping(&self) -> bool {
+        if let Event::Ping(_) = self {
+            true
+        } else {
+            false
         }
     }
 }
@@ -311,6 +324,8 @@ pub struct AccountUpdateBalances {
     pub wallet_balance: f64,
     #[serde(rename = "cw", deserialize_with = "parse_f64_string")]
     pub cross_wallet_balance: f64,
+    #[serde(rename = "bc", deserialize_with = "parse_f64_string")]
+    pub balance_change: f64,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq)]

@@ -95,7 +95,7 @@ impl Client {
         self.client.get(&url)
     }
 
-    pub fn get3(
+    pub fn get2(
         &self,
         endpoint: &str,
         query_string: Option<&str>,

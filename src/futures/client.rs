@@ -1,28 +1,12 @@
-// Copyright (c) 2021 Cranky Kernel
+// SPDX-License-Identifier: MIT
 //
-// Permission is hereby granted, free of charge, to any person
-// obtaining a copy of this software and associated documentation
-// files (the "Software"), to deal in the Software without
-// restriction, including without limitation the rights to use, copy,
-// modify, merge, publish, distribute, sublicense, and/or sell copies
-// of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be
-// included in all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-// NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-// HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-// WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-// DEALINGS IN THE SOFTWARE.
+// Copyright (C) 2021-2022 Cranky Kernel
 
 use std::collections::HashMap;
 use std::fmt::Formatter;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use hmac::{Mac, NewMac};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -37,38 +21,78 @@ pub const API_ROOT: &str = "https://fapi.binance.com";
 
 #[derive(Clone)]
 pub struct Client {
+    auth: Option<Authentication>,
     client: crate::common::client::Client,
 }
 
 impl Client {
     pub fn new(authentication: Option<Authentication>) -> Self {
         Self {
+            auth: authentication.clone(),
             client: crate::common::client::Client::new(API_ROOT, authentication),
         }
     }
 
-    pub async fn get<T: DeserializeOwned>(
-        &self,
-        endpoint: &str,
-        query_string: Option<&str>,
-    ) -> Result<T, Error> {
-        let url = self.client.url2(endpoint, query_string)?;
-        let response = self.client.client.get(url).send().await?;
+    pub fn compute_signature(&self, request_body: &str) -> anyhow::Result<String> {
+        let mut macr = hmac::Hmac::<sha2::Sha256>::new_varkey(
+            self.auth.as_ref().unwrap().api_secret.as_bytes(),
+        )
+        .map_err(|err| anyhow::anyhow!("hmac: {:?}", err))?;
+        macr.update(request_body.as_bytes());
+        let signature = macr.finalize();
+        Ok(format!("{:x}", signature.into_bytes()))
+    }
+
+    pub fn sign_form(&self, form: Option<&str>) -> anyhow::Result<String> {
+        let form = form.unwrap_or("");
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let form = format!("{}&recvWindow=1000&timestamp={}", form, timestamp);
+        let signature = self.compute_signature(&form)?;
+        let form = format!("{}&signature={}", &form, &signature);
+        Ok(form)
+    }
+
+    pub fn headers(&self) -> anyhow::Result<reqwest::header::HeaderMap> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(auth) = &self.auth {
+            headers.insert("X-MBX-APIKEY", auth.api_key.parse()?);
+        }
+        headers.insert("Content-Type", "application/x-www-form-urlencoded".parse()?);
+        Ok(headers)
+    }
+
+    /// Public (unauthenticated) get.
+    pub async fn get<F, T>(&self, endpoint: &str, query_string: F) -> Result<T, Error>
+    where
+        F: Serialize,
+        T: DeserializeOwned,
+    {
+        let url = format!("{}{}", API_ROOT, endpoint);
+        let response = self
+            .client
+            .client
+            .get(url)
+            .query(&query_string)
+            .send()
+            .await?;
         let code = response.status();
         let body = response.text().await?;
         self.decode_response(code, &body)
     }
 
-    pub async fn authenticated_get<T: DeserializeOwned>(
+    /// Private/user (authenticated) get.
+    pub async fn authenticated_get<T: DeserializeOwned, F: Serialize>(
         &self,
         endpoint: &str,
-        form: &str,
+        form: F,
     ) -> Result<T, Error> {
-        let form = self.client.sign_form(Some(form))?;
-        let request = self
-            .client
-            .get3(endpoint, Some(&form))?
-            .headers(self.client.headers()?);
+        let form = serde_urlencoded::to_string(form)?;
+        let form = self.sign_form(Some(&form))?;
+        let url = format!("{}{}?{}", API_ROOT, endpoint, &form);
+        let request = self.client.client.get(url).headers(self.headers()?);
         let response = request.send().await?;
         let code = response.status();
         let body = response.text().await?;
@@ -99,16 +123,14 @@ impl Client {
         }
     }
 
-    pub async fn get_open_orders<S: AsRef<str> + std::fmt::Display + std::fmt::Debug>(
+    pub async fn get_open_orders<
+        S: AsRef<str> + Serialize + std::fmt::Display + std::fmt::Debug,
+    >(
         &self,
         symbol: Option<S>,
     ) -> Result<Vec<OpenOrder>, Error> {
         let endpoint = "/fapi/v1/openOrders";
-        let mut form = vec![];
-        if let Some(symbol) = symbol {
-            form.push(("symbol", symbol));
-        }
-        let form = build_form(&form[..]);
+        let form = vec![("symbol", symbol)];
         let response = self.authenticated_get(endpoint, &form).await?;
         Ok(response)
     }
@@ -145,27 +167,26 @@ impl Client {
         self.decode_response(code, &body)
     }
 
-    pub async fn get_klines(
+    pub async fn get_klines<S: AsRef<str>, I: AsRef<str>>(
         &self,
-        symbol: &str,
-        interval: &str,
+        symbol: S,
+        interval: I,
         limit: Option<u16>,
     ) -> Result<Vec<Kline>, Error> {
-        use std::fmt::Write;
         let endpoint = "/fapi/v1/klines";
-        let mut qs = format!("symbol={}&interval={}", symbol, interval);
+        let mut form = vec![
+            ("symbol", symbol.as_ref().to_string()),
+            ("interval", interval.as_ref().to_string()),
+        ];
         if let Some(limit) = limit {
-            write!(qs, "&limit={}", limit).unwrap();
+            form.push(("limit", limit.to_string()));
         }
-        let response = self.client.get3(endpoint, Some(&qs))?.send().await?;
-        let code = response.status();
-        let body = response.text().await?;
-        self.decode_response(code, &body)
+        self.get(endpoint, form).await
     }
 
     pub async fn get_exchange_info(&self) -> Result<ExchangeInfoResponse, Error> {
         let endpoint = "/fapi/v1/exchangeInfo";
-        self.get(endpoint, None).await
+        self.get(endpoint, ()).await
     }
 
     pub async fn post_listenkey(&self) -> Result<ListenKeyResponse, Error> {
@@ -195,48 +216,15 @@ impl Client {
         self.decode_response(code, &body)
     }
 
-    // pub async fn post_batch_orders(
-    //     &self,
-    //     orders: &[&NewOrder],
-    // ) -> Result<Vec<OrderResponse>, Error> {
-    //     let endpoint = "/fapi/v1/batchOrders";
-    //
-    //     let orders = serde_json::to_string(orders).unwrap();
-    //     dbg!(&orders);
-    //
-    //     #[derive(Serialize)]
-    //     struct BatchOrder {
-    //         batchOrders: String,
-    //     }
-    //
-    //     let batchOrder = BatchOrder {
-    //         batchOrders: orders,
-    //     };
-    //
-    //     let form = serde_urlencoded::to_string(&batchOrder)?;
-    //     dbg!(&form);
-    //     let form = self.client.sign_form(Some(&form))?;
-    //     let response = self
-    //         .client
-    //         .client
-    //         .post(&format!("{}{}", API_ROOT, endpoint))
-    //         .headers(self.client.headers()?)
-    //         .body(form)
-    //         .send()
-    //         .await?;
-    //     let code = response.status();
-    //     let body = response.text().await?;
-    //     self.decode_response(code, &body)
-    // }
-
     pub async fn get_positions(&self, symbol: Option<&str>) -> Result<Vec<PositionEntry>, Error> {
         let endpoint = "/fapi/v2/positionRisk";
-        let form = if let Some(symbol) = symbol {
-            format!("symbol={}", symbol)
-        } else {
-            "".to_string()
-        };
-        self.authenticated_get(endpoint, &form).await
+        let form = vec![("symbol", symbol)];
+        self.authenticated_get(endpoint, form).await
+    }
+
+    pub async fn get_account_info(&self) -> Result<Account, Error> {
+        let endpoint = "/fapi/v2/account";
+        self.authenticated_get(endpoint, ()).await
     }
 
     pub async fn book_ticker(&self, symbol: &str) -> Result<BookTickerResponse, Error> {
@@ -249,19 +237,22 @@ impl Client {
         let body = response.text().await?;
         self.decode_response(status, &body)
     }
+
+    pub async fn get_position_mode(&self) -> Result<PositionModeResponse, Error> {
+        self.authenticated_get("/fapi/v1/positionSide/dual", ())
+            .await
+    }
+
+    pub async fn is_hedge_mode(&self) -> Result<bool, Error> {
+        let response = self.get_position_mode().await?;
+        Ok(response.dual_side_position)
+    }
 }
 
-fn build_form<S: AsRef<str> + std::fmt::Display + std::fmt::Debug>(vals: &[(&str, S)]) -> String {
-    let mut buf = String::new();
-    for (key, val) in vals {
-        if !buf.is_empty() {
-            buf.push('&');
-        }
-        buf.push_str(key);
-        buf.push('=');
-        buf.push_str(val.as_ref());
-    }
-    buf
+#[derive(Debug, Deserialize, Clone)]
+pub struct PositionModeResponse {
+    #[serde(rename = "dualSidePosition")]
+    pub dual_side_position: bool,
 }
 
 /// Open Order Response
@@ -439,37 +430,36 @@ pub struct PositionEntry {
     pub position_side: String,
 }
 
-impl PositionEntry {
-    // Returns a position ID. For Binance Futures this is imply the symbol
-    // and the position side.
-    //
-    // TODO: Does NOT belong in generic Binance crate.
-    pub fn id(&self) -> (String, String) {
-        (self.symbol.to_string(), self.position_side.to_string())
-    }
-}
-
-#[derive(Serialize, Debug, Clone)]
+#[derive(Serialize, Debug, Clone, Default)]
 pub struct NewOrder {
-    // Required fields.
-    pub symbol: String,
-    pub side: OrderSide,
-    #[serde(rename = "type")]
-    pub order_type: OrderType,
+    /// Symbol
+    pub symbol: Option<String>,
 
-    // Not always required, and optional fields.
+    /// Order side
+    pub side: Option<OrderSide>,
+
+    /// Order type
+    #[serde(rename = "type")]
+    pub order_type: Option<OrderType>,
+
     #[serde(rename = "positionSide")]
     pub position_side: Option<PositionSide>,
+
     #[serde(serialize_with = "serialize_opt_f64")]
     pub quantity: Option<f64>,
+
     #[serde(serialize_with = "serialize_opt_f64")]
     pub price: Option<f64>,
+
     #[serde(rename = "timeInForce")]
     pub time_in_force: Option<TimeInForce>,
+
     #[serde(rename = "reduceOnly")]
     pub reduce_only: Option<bool>,
+
     #[serde(rename = "stopPrice")]
     pub stop_price: Option<f64>,
+
     #[serde(rename = "newClientOrderId")]
     pub client_order_id: Option<String>,
 
@@ -478,35 +468,28 @@ pub struct NewOrder {
 }
 
 impl NewOrder {
-    pub fn new(symbol: &str, side: OrderSide, order_type: OrderType) -> Self {
+    pub fn new<S: AsRef<str>>(symbol: S, side: OrderSide, order_type: OrderType) -> Self {
         Self {
-            symbol: symbol.to_uppercase(),
-            side,
-            order_type,
-            position_side: None,
-            quantity: None,
-            price: None,
-            time_in_force: None,
-            reduce_only: None,
-            stop_price: None,
-            client_order_id: None,
-            close_position: None,
+            symbol: Some(symbol.as_ref().to_uppercase()),
+            side: Some(side),
+            order_type: Some(order_type),
+            ..Default::default()
         }
     }
 
-    pub fn new_market_buy(symbol: &str, quantity: f64) -> Self {
+    pub fn new_market_buy<S: AsRef<str>>(symbol: S, quantity: f64) -> Self {
         let mut order = Self::new(symbol, OrderSide::Buy, OrderType::Market);
         order.quantity = Some(quantity);
         order
     }
 
-    pub fn new_market_sell(symbol: &str, quantity: f64) -> Self {
+    pub fn new_market_sell<S: AsRef<str>>(symbol: S, quantity: f64) -> Self {
         let mut order = Self::new(symbol, OrderSide::Sell, OrderType::Market);
         order.quantity = Some(quantity);
         order
     }
 
-    pub fn new_limit_buy(symbol: &str, price: f64, quantity: f64) -> Self {
+    pub fn new_limit_buy<S: AsRef<str>>(symbol: S, price: f64, quantity: f64) -> Self {
         let mut order = Self::new(symbol, OrderSide::Buy, OrderType::Limit);
         order.price = Some(price);
         order.quantity = Some(quantity);
@@ -514,7 +497,7 @@ impl NewOrder {
         order
     }
 
-    pub fn new_limit_sell(symbol: &str, price: f64, quantity: f64) -> Self {
+    pub fn new_limit_sell<S: AsRef<str>>(symbol: S, price: f64, quantity: f64) -> Self {
         let mut order = Self::new(symbol, OrderSide::Sell, OrderType::Limit);
         order.price = Some(price);
         if quantity > 0.0 {
@@ -600,6 +583,12 @@ pub struct OrderResponse {
     pub price_protect: bool,
     #[serde(flatten)]
     pub other: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct Account {
+    #[serde(rename = "totalMarginBalance", deserialize_with = "parse_f64_string")]
+    pub total_margin_balance: f64,
 }
 
 #[cfg(test)]

@@ -3,16 +3,17 @@ use binance::common::client::Authentication;
 use clap::Parser;
 
 #[derive(clap::Parser, Debug)]
-enum Futures {
-    OpenOrders(OpenOrdersOpts),
-    Cancel(CancelOrderOpts),
-}
-
-#[derive(clap::Parser, Debug)]
 enum Opts {
     Spot,
     #[clap(subcommand)]
     Futures(Futures),
+}
+
+#[derive(clap::Parser, Debug)]
+enum Futures {
+    Buy(FuturesBuyOptions),
+    OpenOrders(OpenOrdersOpts),
+    Cancel(CancelOrderOpts),
 }
 
 #[derive(clap::Parser, Debug)]
@@ -30,6 +31,9 @@ struct CancelOrderOpts {
     #[clap(long)]
     client_order_id: Option<String>,
 }
+
+#[derive(clap::Parser, Debug)]
+struct FuturesBuyOptions {}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -70,5 +74,11 @@ async fn futures_cancel_order(opts: CancelOrderOpts) -> Result<()> {
         Ok(response) => println!("success: {:?}", response),
         Err(error) => println!("error: {:?}", error),
     }
+    Ok(())
+}
+
+async fn futures_buy_order(options: FuturesBuyOptions) -> Result<()> {
+    let auth = get_binance_authentication()?;
+
     Ok(())
 }
